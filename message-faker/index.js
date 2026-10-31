@@ -43,6 +43,7 @@
   storage.embedTitle = storage.embedTitle || "";
   storage.embedDescription = storage.embedDescription || "";
   storage.embedImageUrl = storage.embedImageUrl || "";
+  if (!Array.isArray(storage.fakes)) storage.fakes = [];
 
   // Snowflake-style ID so Discord's message sorting/timestamp code does not choke.
   function makeSnowflake() {
@@ -91,7 +92,13 @@
     };
   }
 
-  // Dispatches a local-only MESSAGE_CREATE. Nothing is sent to Discord's servers.
+  function displayName(user, id) {
+    if (!user) return "Unknown (" + id + ")";
+    return user.globalName || user.username || id;
+  }
+
+  // Dispatches a local-only MESSAGE_CREATE and remembers it in the manage list.
+  // Nothing is sent to Discord's servers.
   function inject(channelId, authorId, content, embed) {
     try {
       var message = createMessage(channelId, authorId, content, embed || null);
@@ -102,11 +109,82 @@
         optimistic: false,
         isPushNotification: false,
       });
+      var list = (storage.fakes || []).slice();
+      list.unshift({
+        id: message.id,
+        channelId: channelId,
+        authorId: authorId,
+        authorName: displayName(UserStore.getUser(authorId), authorId),
+        message: message,
+      });
+      storage.fakes = list.slice(0, 100);
       return true;
     } catch (e) {
       console.error("[Message Faker] inject failed:", e);
       return false;
     }
+  }
+
+  function findFake(id) {
+    var list = storage.fakes || [];
+    for (var i = 0; i < list.length; i++) if (list[i].id === id) return list[i];
+    return null;
+  }
+
+  // Removes it from the screen and from the list.
+  function removeFake(id) {
+    var rec = findFake(id);
+    if (rec) {
+      try {
+        FluxDispatcher.dispatch({ type: "MESSAGE_DELETE", id: id, channelId: rec.channelId });
+      } catch (e) {
+        console.error("[Message Faker] delete failed:", e);
+      }
+    }
+    storage.fakes = (storage.fakes || []).filter(function (r) { return r.id !== id; });
+  }
+
+  function editFake(id, content) {
+    var rec = findFake(id);
+    if (!rec) return false;
+    try {
+      var updated = Object.assign({}, rec.message, {
+        content: content,
+        edited_timestamp: new Date().toISOString(),
+      });
+      FluxDispatcher.dispatch({ type: "MESSAGE_UPDATE", message: updated });
+      storage.fakes = (storage.fakes || []).map(function (r) {
+        return r.id === id ? Object.assign({}, r, { message: updated }) : r;
+      });
+      return true;
+    } catch (e) {
+      console.error("[Message Faker] edit failed:", e);
+      return false;
+    }
+  }
+
+  // After an app restart the message is gone from the screen but still in the list.
+  function reshowFake(id) {
+    var rec = findFake(id);
+    if (!rec) return false;
+    try {
+      FluxDispatcher.dispatch({
+        type: "MESSAGE_CREATE",
+        channelId: rec.channelId,
+        message: rec.message,
+        optimistic: false,
+        isPushNotification: false,
+      });
+      return true;
+    } catch (e) {
+      console.error("[Message Faker] reshow failed:", e);
+      return false;
+    }
+  }
+
+  function clearFakes() {
+    (storage.fakes || []).slice().forEach(function (r) { removeFake(r.id); });
+    storage.fakes = [];
   }
 
   function getDMChannel(userId) {
@@ -156,7 +234,7 @@
     );
   }
 
-  function Settings() {
+  function CreateView() {
     var target = useStored("targetUserId");
     var from = useStored("fromUserId");
     var content = useStored("messageContent");
@@ -248,9 +326,138 @@
     );
   }
 
+  function smallButton(label, color, onPress) {
+    return h(
+      TouchableOpacity,
+      {
+        onPress: onPress,
+        style: {
+          backgroundColor: color,
+          paddingVertical: 8,
+          paddingHorizontal: 14,
+          borderRadius: 6,
+          marginRight: 8,
+          marginTop: 8,
+        },
+      },
+      h(Text, { style: { color: "white", fontWeight: "600" } }, label)
+    );
+  }
+
+  function ManageView() {
+    var tick = React.useState(0);
+    var refresh = function () { tick[1](tick[0] + 1); };
+    var editingState = React.useState(null);
+    var draftState = React.useState("");
+    var editing = editingState[0];
+    var list = storage.fakes || [];
+
+    function row(rec) {
+      var msg = rec.message || {};
+      var isEditing = editing === rec.id;
+      var when = msg.timestamp ? new Date(msg.timestamp).toLocaleString() : "";
+      var body = [
+        h(Text, { key: "who", style: { color: semanticColors.TEXT_NORMAL, fontWeight: "700" } },
+          rec.authorName + (msg.edited_timestamp ? " (edited)" : "")),
+        h(Text, { key: "meta", style: { color: semanticColors.TEXT_MUTED, fontSize: 12, marginBottom: 6 } },
+          when + "  \u2022  channel " + rec.channelId),
+      ];
+
+      if (isEditing) {
+        body.push(
+          h(FormInput, { key: "edit", value: draftState[0], onChange: draftState[1], placeholder: "New message text", title: "Edit message" }),
+          h(View, { key: "editBtns", style: { flexDirection: "row" } },
+            smallButton("Save", "#3BA55D", function () {
+              if (!draftState[0]) { showToast("Message can't be empty", icon("ic_close_16px")); return; }
+              var ok = editFake(rec.id, draftState[0]);
+              showToast(ok ? "Edited (local only)" : "Edit failed", icon(ok ? "toast_image_saved" : "ic_close_16px"));
+              editingState[1](null);
+              refresh();
+            }),
+            smallButton("Cancel", "#747F8D", function () { editingState[1](null); })
+          )
+        );
+      } else {
+        body.push(
+          h(Text, { key: "text", style: { color: semanticColors.TEXT_NORMAL } }, msg.content || "(no text)"),
+          h(View, { key: "btns", style: { flexDirection: "row", flexWrap: "wrap" } },
+            smallButton("Edit", "#5865F2", function () { draftState[1](msg.content || ""); editingState[1](rec.id); }),
+            smallButton("Delete", "#ED4245", function () {
+              removeFake(rec.id);
+              showToast("Removed from screen and list", icon("toast_image_saved"));
+              refresh();
+            }),
+            smallButton("Re-show", "#747F8D", function () {
+              var ok = reshowFake(rec.id);
+              showToast(ok ? "Shown again" : "Could not show", icon(ok ? "toast_image_saved" : "ic_close_16px"));
+            })
+          )
+        );
+      }
+
+      return h(View, { key: rec.id, style: { padding: 15 } }, body);
+    }
+
+    var children = [
+      h(FormSection, { key: "hdr", title: "FAKED MESSAGES (" + list.length + ")" },
+        h(FormText, { style: { color: semanticColors.TEXT_MUTED, marginHorizontal: 15 } },
+          "Local only. After an app restart the messages disappear from chat but stay here. Tap Re-show to bring one back.")),
+    ];
+
+    if (list.length === 0) {
+      children.push(h(FormRow, { key: "empty", label: "No faked messages yet." }));
+    } else {
+      list.forEach(function (rec, i) {
+        children.push(row(rec));
+        children.push(h(FormDivider, { key: "div" + i }));
+      });
+      children.push(button("Delete all", "#ED4245", function () {
+        clearFakes();
+        showToast("Cleared all", icon("toast_image_saved"));
+        refresh();
+      }));
+    }
+    children.push(h(View, { key: "spacer", style: { height: 50 } }));
+
+    return h(ScrollView, { style: { flex: 1, backgroundColor: semanticColors.BACKGROUND_MOBILE_PRIMARY } }, children);
+  }
+
+  function Settings() {
+    var tabState = React.useState("create");
+    var tab = tabState[0];
+    var count = (storage.fakes || []).length;
+    function tabBtn(id, label) {
+      var active = tab === id;
+      return h(
+        TouchableOpacity,
+        {
+          key: id,
+          onPress: function () { tabState[1](id); },
+          style: {
+            flex: 1,
+            padding: 12,
+            alignItems: "center",
+            backgroundColor: active ? "#5865F2" : "transparent",
+            borderRadius: 8,
+            margin: 4,
+          },
+        },
+        h(Text, { style: { color: active ? "white" : semanticColors.TEXT_NORMAL, fontWeight: "600" } }, label)
+      );
+    }
+    return h(
+      View,
+      { style: { flex: 1, backgroundColor: semanticColors.BACKGROUND_MOBILE_PRIMARY } },
+      h(View, { style: { flexDirection: "row", padding: 8 } },
+        tabBtn("create", "Create"),
+        tabBtn("manage", "Manage (" + count + ")")),
+      tab === "create" ? h(CreateView) : h(ManageView)
+    );
+  }
+
   exports.default = {
     onLoad: function () {
-      window.messageFaker = { inject: inject, createMessage: createMessage, getDMChannel: getDMChannel };
+      window.messageFaker = { inject: inject, createMessage: createMessage, getDMChannel: getDMChannel, remove: removeFake, edit: editFake, clear: clearFakes };
     },
     onUnload: function () {
       delete window.messageFaker;

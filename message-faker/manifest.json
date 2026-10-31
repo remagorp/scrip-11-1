@@ -3,6 +3,6 @@
   "description": "Adds local-only fake messages to your own DMs view. Nothing is sent to Discord.",
   "authors": [{ "name": "remagorp" }],
   "main": "index.js",
-  "hash": "67372606fd6049f67f9e7990a2a90e6405ebe98ae93e647018cb58fcb8b5def8",
+  "hash": "a04ffac28fd9cda2828aebadbef67a34ace31e102753ac25659f8bea9fff6a98",
   "vendetta": { "icon": "ic_message_edit" }
 }
