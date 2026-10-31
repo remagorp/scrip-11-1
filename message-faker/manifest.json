@@ -1,0 +1,8 @@
+{
+  "name": "Message Faker",
+  "description": "Adds local-only fake messages to your own DMs view. Nothing is sent to Discord.",
+  "authors": [{ "name": "remagorp" }],
+  "main": "index.js",
+  "hash": "67372606fd6049f67f9e7990a2a90e6405ebe98ae93e647018cb58fcb8b5def8",
+  "vendetta": { "icon": "ic_message_edit" }
+}
